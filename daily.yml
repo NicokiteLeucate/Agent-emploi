@@ -1,0 +1,49 @@
+# .github/workflows/daily.yml
+# Ce fichier dit à GitHub : "lance le script chaque matin à 7h00"
+
+name: Agent emploi quotidien
+
+on:
+  # Lancement automatique chaque matin à 7h00 (heure Paris = UTC+1/+2)
+  # GitHub Actions tourne en UTC, donc 6h UTC = 7h Paris (hiver)
+  # En été (heure d'été) : mettre 5h UTC pour avoir 7h Paris
+  schedule:
+    - cron: '0 6 * * 1-5'   # Du lundi au vendredi à 6h UTC (7h Paris hiver)
+
+  # Lancement manuel possible depuis l'onglet Actions → "Run workflow"
+  workflow_dispatch:
+
+jobs:
+  recherche-emploi:
+    runs-on: ubuntu-latest   # GitHub fournit un serveur Linux gratuitement
+
+    steps:
+      # 1. Récupère les fichiers de ton dépôt sur le serveur
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      # 2. Installe Python
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # 3. Installe les bibliothèques nécessaires (feedparser, requests)
+      - name: Installer les dépendances
+        run: pip install -r requirements.txt
+
+      # 4. Lance le script (les secrets sont injectés comme variables d'environnement)
+      - name: Lancer l'agent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+        run: python scraper.py
+
+      # 5. Sauvegarde l'historique des annonces vues (évite les doublons le lendemain)
+      - name: Sauvegarder l'historique
+        uses: actions/upload-artifact@v4
+        with:
+          name: historique-annonces
+          path: historique_annonces.json
+          retention-days: 35
+          if-no-files-found: ignore
