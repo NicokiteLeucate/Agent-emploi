@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # ============================================================
 #  AGENT RECHERCHE EMPLOI - Nicolas Reichstadt
-#  Configure tes preferences dans la section ci-dessous
+#  Utilise l'API officielle France Travail (ex Pole Emploi)
 # ============================================================
 
-# --- TA CONFIGURATION (seule partie a modifier) -------------
+# --- TA CONFIGURATION --------------------------------------
 MOTS_CLES = [
     "methodes",
     "industrialisation",
@@ -15,72 +15,127 @@ MOTS_CLES = [
     "responsable methodes",
 ]
 
-# Mots acceptes dans le texte de l'annonce pour la zone geo
-ZONES_GEO = [
-    "seine-maritime", "seine maritime", "76",
-    "rouen", "le havre", "havre", "dieppe", "fecamp", "elbeuf",
-    "barentin", "yvetot", "montivilliers", "bolbec",
-    "normandie", "haute-normandie",
-    "remote", "teletravail", "distanciel", "france entiere",
-]
-
-# Mettre a False pour recevoir TOUTES les annonces sans filtre geo
-# (utile pour diagnostiquer si le probleme vient du filtre)
-FILTRER_PAR_ZONE = False
-
+DEPARTEMENT = "76"          # Seine-Maritime
+MAX_RESULTATS = 50          # par requete API (max 150)
 EMAIL_DESTINATAIRE = "nicolas.reichstadt@gmail.com"
 EMAIL_EXPEDITEUR   = "nicolas.reichstadt@gmail.com"
-
-MAX_ANNONCES_PAR_SITE = 10
-# ------------------------------------------------------------
+# -----------------------------------------------------------
 
 import os
 import re
 import json
 import smtplib
 import hashlib
-import feedparser
 import requests
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GMAIL_PASSWORD  = os.environ.get("GMAIL_PASSWORD", "")
+# Secrets GitHub
+FT_CLIENT_ID     = os.environ.get("client_id", "")
+FT_CLIENT_SECRET = os.environ.get("client_secret", "")
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+GMAIL_PASSWORD   = os.environ.get("GMAIL_PASSWORD", "")
+
 FICHIER_HISTORIQUE = "historique_annonces.json"
 
 # ============================================================
-#  FLUX RSS - UN PAR MOT-CLE (logique OU)
+#  AUTHENTIFICATION FRANCE TRAVAIL
 # ============================================================
 
-def construire_flux_rss():
-    flux = {}
-    for mot in MOTS_CLES:
-        mot_url = mot.replace(" ", "+")
-        mot_pct = mot.replace(" ", "%20")
-
-        # APEC - code departement 76 = Seine-Maritime
-        flux[f"APEC|{mot}"] = (
-            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi"
-            f"?motsCles={mot_pct}&lieu=76&page=1&format=rss"
-        )
-
-        # Indeed France - fromage=1 = annonces des 24 dernieres heures
-        flux[f"Indeed|{mot}"] = (
-            f"https://fr.indeed.com/rss?q={mot_url}&l=Seine-Maritime"
-            f"&sort=date&fromage=1"
-        )
-
-        # Welcome to the Jungle
-        flux[f"WTTJ|{mot}"] = (
-            f"https://www.welcometothejungle.com/fr/jobs.rss"
-            f"?query={mot_pct}&aroundQuery=Seine-Maritime&page=1"
-        )
-
-    return flux
+def obtenir_token():
+    """
+    Obtient un token d'acces OAuth2 aupres de France Travail.
+    Le token est valable 1500 secondes (~25 min), largement suffisant.
+    """
+    print("Authentification France Travail...")
+    url = "https://entreprise.francetravail.fr/connexion/oauth2/access_token"
+    params = {"realm": "/partenaire"}
+    data = {
+        "grant_type":    "client_credentials",
+        "client_id":     FT_CLIENT_ID,
+        "client_secret": FT_CLIENT_SECRET,
+        "scope":         "api_offresdemploiv2 o2dsoffre",
+    }
+    try:
+        r = requests.post(url, params=params, data=data, timeout=15)
+        print(f"  HTTP {r.status_code}")
+        if r.status_code == 200:
+            token = r.json().get("access_token", "")
+            print("  Token obtenu avec succes")
+            return token
+        else:
+            print(f"  ERREUR auth : {r.text[:300]}")
+            return None
+    except Exception as e:
+        print(f"  EXCEPTION auth : {e}")
+        return None
 
 # ============================================================
-#  HISTORIQUE (anti-doublons entre les jours)
+#  RECHERCHE DES OFFRES
+# ============================================================
+
+def rechercher_offres(token, mot_cle):
+    """
+    Appelle l'API France Travail pour un mot-cle donne.
+    Filtre sur le departement 76 et les offres des 24 dernieres heures.
+    """
+    url = "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept":        "application/json",
+    }
+
+    # Date d'hier pour ne recuperer que les nouvelles offres
+    hier = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    params = {
+        "motsCles":          mot_cle,
+        "departement":       DEPARTEMENT,
+        "minCreationDate":   hier,
+        "range":             f"0-{MAX_RESULTATS - 1}",
+        "sort":              "1",   # tri par date
+    }
+
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=20)
+        print(f"  [{mot_cle}] HTTP {r.status_code}", end="")
+
+        if r.status_code == 200:
+            data = r.json()
+            offres = data.get("resultats", [])
+            print(f" — {len(offres)} offre(s)")
+            return offres
+        elif r.status_code == 204:
+            print(" — aucune offre (204 No Content)")
+            return []
+        else:
+            print(f" — ERREUR : {r.text[:200]}")
+            return []
+    except Exception as e:
+        print(f" — EXCEPTION : {e}")
+        return []
+
+def normaliser_offre(offre):
+    """Convertit une offre API en dictionnaire uniforme."""
+    lieu = offre.get("lieuTravail", {})
+    entreprise = offre.get("entreprise", {})
+    return {
+        "id":         offre.get("id", ""),
+        "title":      offre.get("intitule", "Sans titre"),
+        "entreprise": entreprise.get("nom", "Entreprise non precisee"),
+        "lieu":       lieu.get("libelle", ""),
+        "contrat":    offre.get("typeContratLibelle", ""),
+        "salaire":    offre.get("salaire", {}).get("libelle", "Non precise"),
+        "summary":    offre.get("description", "")[:400],
+        "link":       offre.get("origineOffre", {}).get("urlOrigine",
+                      f"https://candidat.francetravail.fr/offres/recherche/detail/{offre.get('id','')}"),
+        "date":       offre.get("dateCreation", ""),
+        "site":       "France Travail",
+    }
+
+# ============================================================
+#  HISTORIQUE ANTI-DOUBLONS
 # ============================================================
 
 def charger_historique():
@@ -101,108 +156,37 @@ def sauvegarder_historique(historique):
     with open(FICHIER_HISTORIQUE, "w", encoding="utf-8") as f:
         json.dump(filtre, f, ensure_ascii=False, indent=2)
 
-def id_annonce(annonce):
-    chaine = f"{annonce.get('title','')}{annonce.get('link','')}"
-    return hashlib.md5(chaine.encode()).hexdigest()
-
-# ============================================================
-#  FILTRE PERTINENCE
-# ============================================================
-
-def est_pertinente(annonce):
-    texte = (
-        annonce.get("title", "") + " " +
-        annonce.get("summary", "") + " " +
-        annonce.get("location", "")
-    ).lower()
-
-    if FILTRER_PAR_ZONE:
-        if not any(z in texte for z in ZONES_GEO):
-            return False
-
-    return any(mot.lower() in texte for mot in MOTS_CLES)
-
-# ============================================================
-#  SCRAPING avec diagnostics detailles
-# ============================================================
-
-def scraper_flux(nom_flux, url_rss):
-    nom_site = nom_flux.split("|")[0]
-    annonces = []
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
-        response = requests.get(url_rss, headers=headers, timeout=20)
-        print(f"   HTTP {response.status_code} — {len(response.content)} octets")
-
-        if response.status_code != 200:
-            print(f"   ERREUR : {response.text[:200]}")
-            return []
-
-        feed = feedparser.parse(response.content)
-        nb = len(feed.entries)
-        print(f"   {nb} entree(s) dans le flux RSS")
-
-        if nb == 0:
-            print(f"   Contenu brut (200 premiers chars) : {response.text[:200]}")
-            return []
-
-        rejets_zone = 0
-        rejets_mots = 0
-        for entry in feed.entries:
-            annonce = {
-                "title":    entry.get("title", "Sans titre"),
-                "link":     entry.get("link", ""),
-                "summary":  re.sub(r"<[^>]+>", " ", entry.get("summary", "")),
-                "location": entry.get("location", ""),
-                "date":     entry.get("published", ""),
-                "site":     nom_site,
-            }
-            texte = (annonce["title"] + " " + annonce["summary"] + " " + annonce["location"]).lower()
-            zone_ok = any(z in texte for z in ZONES_GEO)
-            mots_ok = any(m.lower() in texte for m in MOTS_CLES)
-
-            if FILTRER_PAR_ZONE and not zone_ok:
-                rejets_zone += 1
-            elif not mots_ok:
-                rejets_mots += 1
-            else:
-                annonces.append(annonce)
-
-        if rejets_zone > 0:
-            print(f"   {rejets_zone} rejet(s) : zone geo non reconnue")
-        if rejets_mots > 0:
-            print(f"   {rejets_mots} rejet(s) : mots-cles absents")
-        if annonces:
-            print(f"   {len(annonces)} annonce(s) retenue(s)")
-
-    except Exception as e:
-        print(f"   EXCEPTION : {e}")
-
-    return annonces[:MAX_ANNONCES_PAR_SITE]
+def id_offre(offre):
+    """Identifiant unique base sur l'ID France Travail (plus fiable qu'un hash)."""
+    return offre.get("id") or hashlib.md5(
+        f"{offre.get('title','')}{offre.get('link','')}".encode()
+    ).hexdigest()
 
 # ============================================================
 #  SYNTHESE GEMINI
 # ============================================================
 
 def synthetiser_avec_gemini(annonces):
-    if not annonces:
-        return "Aucune nouvelle annonce aujourd'hui."
     if not GEMINI_API_KEY:
-        return "Cle Gemini manquante — liste brute :\n\n" + "\n".join(
-            f"- {a['title']} ({a['site']})\n  {a['link']}" for a in annonces
-        )
+        # Pas de Gemini : on envoie la liste brute
+        texte = "Nouvelles offres du jour :\n\n"
+        for a in annonces:
+            texte += (
+                f"- {a['title']}\n"
+                f"  Entreprise : {a['entreprise']}\n"
+                f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
+                f"  Salaire : {a['salaire']}\n"
+                f"  Lien : {a['link']}\n\n"
+            )
+        return texte
 
     liste_texte = ""
     for i, a in enumerate(annonces, 1):
         liste_texte += (
-            f"\n{i}. [{a['site']}] {a['title']}\n"
-            f"   Resume : {a['summary'][:300]}\n"
+            f"\n{i}. {a['title']}\n"
+            f"   Entreprise : {a['entreprise']}\n"
+            f"   Lieu : {a['lieu']} | Contrat : {a['contrat']} | Salaire : {a['salaire']}\n"
+            f"   Description : {a['summary']}\n"
             f"   Lien : {a['link']}\n"
         )
 
@@ -212,10 +196,10 @@ def synthetiser_avec_gemini(annonces):
         f"lean, amelioration continue ou chef de projet en Seine-Maritime.\n\n"
         f"{liste_texte}\n\n"
         f"Redige un email de synthese en francais avec :\n"
-        f"1. Un court resume global (2-3 phrases)\n"
-        f"2. Pour chaque annonce : titre, entreprise si connue, resume en 1-2 phrases, lien\n"
-        f"3. Un conseil du jour pour les candidatures dans ce secteur\n\n"
-        f"Format : texte simple, lisible dans un email."
+        f"1. Un resume global en 2-3 phrases sur la qualite des offres du jour\n"
+        f"2. Pour chaque offre : titre, entreprise, lieu, type de contrat, resume en 1-2 phrases, lien\n"
+        f"3. Un conseil du jour pour les candidatures dans ce secteur industriel\n\n"
+        f"Format : texte clair et lisible dans un email, sans markdown."
     )
 
     try:
@@ -225,7 +209,7 @@ def synthetiser_avec_gemini(annonces):
         )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000}
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000},
         }
         r = requests.post(url, json=payload, timeout=30)
         data = r.json()
@@ -236,9 +220,11 @@ def synthetiser_avec_gemini(annonces):
             raise ValueError("Pas de candidates")
     except Exception as e:
         print(f"Erreur Gemini : {e}")
-        return "Synthese indisponible.\n\n" + "\n".join(
-            f"- {a['title']} ({a['site']})\n  {a['link']}" for a in annonces
-        )
+        # Fallback liste brute
+        texte = f"Synthese IA indisponible. {len(annonces)} offres du jour :\n\n"
+        for a in annonces:
+            texte += f"- {a['title']} — {a['entreprise']} ({a['lieu']})\n  {a['link']}\n\n"
+        return texte
 
 # ============================================================
 #  ENVOI EMAIL
@@ -246,9 +232,10 @@ def synthetiser_avec_gemini(annonces):
 
 def envoyer_email(sujet, corps):
     if not GMAIL_PASSWORD:
-        print("GMAIL_PASSWORD manquant — email non envoye.")
-        print("=== CONTENU QUI AURAIT ETE ENVOYE ===")
-        print(corps)
+        print("GMAIL_PASSWORD manquant — contenu qui aurait ete envoye :")
+        print("=" * 50)
+        print(corps[:1000])
+        print("=" * 50)
         return
 
     msg = MIMEMultipart("alternative")
@@ -272,66 +259,71 @@ def envoyer_email(sujet, corps):
 def main():
     print(f"\n{'='*55}")
     print(f"  Agent emploi — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    print(f"  Filtre zone : {'ACTIF' if FILTRER_PAR_ZONE else 'DESACTIVE (mode debug)'}")
+    print(f"  Departement : {DEPARTEMENT} (Seine-Maritime)")
+    print(f"  Mots-cles : {len(MOTS_CLES)} termes")
     print(f"{'='*55}\n")
 
+    # Verification des secrets
+    if not FT_CLIENT_ID or not FT_CLIENT_SECRET:
+        print("ERREUR : secrets client_id / client_secret manquants dans GitHub.")
+        print("Va dans Settings -> Secrets -> Actions et verifie les noms.")
+        return
+
+    # 1. Authentification
+    token = obtenir_token()
+    if not token:
+        print("Impossible d'obtenir le token France Travail. Arret.")
+        return
+
+    # 2. Charger l'historique
     historique = charger_historique()
     ids_vus = {h["id"] for h in historique}
-    print(f"Historique : {len(ids_vus)} annonces deja connues\n")
+    print(f"\nHistorique : {len(ids_vus)} offres deja connues\n")
 
-    flux = construire_flux_rss()
-    nouvelles_annonces = []
+    # 3. Recherche par mot-cle (logique OU)
+    print("Recherche des offres...")
+    toutes_offres = []
     ids_session = set()
-    sites_compteurs = {}
 
-    for nom_flux, url_rss in flux.items():
-        print(f">>> {nom_flux}")
-        annonces = scraper_flux(nom_flux, url_rss)
-
-        nb_nouvelles = 0
-        for annonce in annonces:
-            aid = id_annonce(annonce)
-            if aid not in ids_vus and aid not in ids_session:
-                annonce["id"] = aid
-                nouvelles_annonces.append(annonce)
-                ids_session.add(aid)
-                ids_vus.add(aid)
+    for mot in MOTS_CLES:
+        offres_brutes = rechercher_offres(token, mot)
+        for o in offres_brutes:
+            offre = normaliser_offre(o)
+            oid = id_offre(offre)
+            if oid not in ids_vus and oid not in ids_session:
+                offre["id"] = oid
+                toutes_offres.append(offre)
+                ids_session.add(oid)
+                ids_vus.add(oid)
                 historique.append({
-                    "id":    aid,
+                    "id":    oid,
                     "date":  datetime.now().isoformat(),
-                    "titre": annonce["title"],
+                    "titre": offre["title"],
                 })
-                nb_nouvelles += 1
 
-        nom_site = nom_flux.split("|")[0]
-        sites_compteurs[nom_site] = sites_compteurs.get(nom_site, 0) + nb_nouvelles
-        print()
+    print(f"\nTotal : {len(toutes_offres)} nouvelle(s) offre(s) unique(s)\n")
 
-    print("--- Bilan ---")
-    for site, nb in sites_compteurs.items():
-        print(f"  {site} : {nb} nouvelle(s)")
-    print(f"  TOTAL : {len(nouvelles_annonces)} annonce(s) unique(s)\n")
-
+    # 4. Sauvegarder l'historique
     sauvegarder_historique(historique)
 
+    # 5. Email
     date_str = datetime.now().strftime("%A %d %B %Y").capitalize()
 
-    if nouvelles_annonces:
+    if toutes_offres:
         print("Synthese Gemini en cours...")
-        synthese = synthetiser_avec_gemini(nouvelles_annonces)
-        sujet = f"[Agent emploi] {len(nouvelles_annonces)} nouvelle(s) offre(s) — {date_str}"
+        synthese = synthetiser_avec_gemini(toutes_offres)
+        sujet = f"[Agent emploi] {len(toutes_offres)} nouvelle(s) offre(s) — {date_str}"
     else:
         synthese = (
             f"Bonjour Nicolas,\n\n"
-            f"Aucune nouvelle offre trouvee aujourd'hui.\n"
-            f"Sites verifies : APEC, Indeed, Welcome to the Jungle\n"
-            f"Mots-cles : {', '.join(MOTS_CLES)}\n\n"
+            f"Aucune nouvelle offre trouvee aujourd'hui en Seine-Maritime "
+            f"pour tes criteres (methodes, lean, chef de projet...).\n\n"
             f"A demain !"
         )
         sujet = f"[Agent emploi] Aucune offre — {date_str}"
 
     envoyer_email(sujet, synthese)
-    print("Agent termine.")
+    print("\nAgent termine avec succes.")
 
 if __name__ == "__main__":
     main()
