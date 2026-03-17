@@ -48,29 +48,35 @@ FICHIER_HISTORIQUE = "historique_annonces.json"
 # ============================================================
 
 def construire_flux_rss():
-    """Construit les URLs RSS pour chaque site selon les mots-clés et la zone."""
+    """
+    Construit les URLs RSS pour chaque site.
+    On crée UN flux par mot-clé (logique OU) plutôt qu'un seul flux
+    avec tous les mots ensemble (qui ferait un ET implicite).
+    """
     flux = {}
-    mots_encodés = "%20".join(MOTS_CLES[:3])  # on prend les 3 premiers mots-clés pour l'URL
     zone_encodée = ZONE_GEO.replace(" ", "+").replace("-", "+")
 
-    # APEC (cadres) - flux RSS natif
-    flux["APEC"] = (
-        f"https://www.apec.fr/candidat/recherche-emploi.html/emploi?"
-        f"motsCles={mots_encodés}&lieu=76&typesContrat=1"
-        f"&page=1&format=rss"
-    )
+    for mot in MOTS_CLES:
+        mot_encodé = mot.replace(" ", "%20")
+        mot_url    = mot.replace(" ", "+")
 
-    # Welcome to the Jungle - flux RSS
-    flux["Welcome to the Jungle"] = (
-        f"https://www.welcometothejungle.com/fr/jobs.rss?"
-        f"query={mots_encodés}&aroundQuery={zone_encodée}&page=1"
-    )
+        # APEC — un flux par mot-clé
+        flux[f"APEC | {mot}"] = (
+            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi?"
+            f"motsCles={mot_encodé}&lieu=76&typesContrat=1&page=1&format=rss"
+        )
 
-    # Indeed France - flux RSS (le plus fiable)
-    flux["Indeed"] = (
-        f"https://fr.indeed.com/rss?q={mots_encodés}"
-        f"&l={zone_encodée}&sort=date&fromage=1"
-    )
+        # Welcome to the Jungle — un flux par mot-clé
+        flux[f"WTTJ | {mot}"] = (
+            f"https://www.welcometothejungle.com/fr/jobs.rss?"
+            f"query={mot_encodé}&aroundQuery={zone_encodée}&page=1"
+        )
+
+        # Indeed — un flux par mot-clé
+        flux[f"Indeed | {mot}"] = (
+            f"https://fr.indeed.com/rss?q={mot_url}"
+            f"&l={zone_encodée}&sort=date&fromage=1"
+        )
 
     return flux
 
@@ -247,29 +253,40 @@ def main():
     ids_vus = {h["id"] for h in historique}
     print(f"📋 Historique : {len(ids_vus)} annonces déjà connues\n")
 
-    # 2. Scraper tous les sites
+    # 2. Scraper tous les sites (un flux par mot-clé = logique OU)
     flux = construire_flux_rss()
-    toutes_annonces = []
     nouvelles_annonces = []
+    ids_session = set()   # évite les doublons dans la même session
+                          # (même annonce trouvée par 2 mots-clés différents)
+    sites_compteurs = {}
 
-    for nom_site, url_rss in flux.items():
-        print(f"🔍 Scraping {nom_site}...")
+    for nom_flux, url_rss in flux.items():
+        nom_site = nom_flux.split(" | ")[0]
+        print(f"🔍 {nom_flux}...")
         annonces = scraper_flux(nom_site, url_rss)
-        print(f"   → {len(annonces)} annonce(s) pertinente(s) trouvée(s)")
 
+        nb_nouvelles = 0
         for annonce in annonces:
             aid = id_annonce(annonce)
-            if aid not in ids_vus:
+            if aid not in ids_vus and aid not in ids_session:
                 annonce["id"] = aid
                 nouvelles_annonces.append(annonce)
-                # Ajouter à l'historique
+                ids_session.add(aid)
+                ids_vus.add(aid)
                 historique.append({
-                    "id":   aid,
-                    "date": datetime.now().isoformat(),
+                    "id":    aid,
+                    "date":  datetime.now().isoformat(),
                     "titre": annonce["title"],
                 })
+                nb_nouvelles += 1
 
-    print(f"\n✨ {len(nouvelles_annonces)} nouvelle(s) annonce(s) (non encore envoyées)\n")
+        sites_compteurs[nom_site] = sites_compteurs.get(nom_site, 0) + nb_nouvelles
+        print(f"   -> {nb_nouvelles} nouvelle(s) (doublons ignores)")
+
+    print(f"\nResume par site :")
+    for site, nb in sites_compteurs.items():
+        print(f"   {site} : {nb} nouvelle(s)")
+    print(f"\n{len(nouvelles_annonces)} nouvelle(s) annonce(s) uniques au total\n")
 
     # 3. Sauvegarder l'historique mis à jour
     sauvegarder_historique(historique)
