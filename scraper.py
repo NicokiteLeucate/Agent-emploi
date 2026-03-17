@@ -32,8 +32,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 # Secrets GitHub
-FT_CLIENT_ID     = os.environ.get("client_id", "")
-FT_CLIENT_SECRET = os.environ.get("client_secret", "")
+FT_CLIENT_ID     = os.environ.get("CLIENT_ID", "")
+FT_CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "")
 GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
 GMAIL_PASSWORD   = os.environ.get("GMAIL_PASSWORD", "")
 
