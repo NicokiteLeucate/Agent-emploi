@@ -1,27 +1,36 @@
 #!/usr/bin/env python3
 # ============================================================
 #  AGENT RECHERCHE EMPLOI - Nicolas Reichstadt
-#  Configure tes préférences dans la section ci-dessous
-#  Tout le reste est automatique !
+#  Configure tes preferences dans la section ci-dessous
 # ============================================================
 
-# --- TA CONFIGURATION (seule partie à modifier) -------------
+# --- TA CONFIGURATION (seule partie a modifier) -------------
 MOTS_CLES = [
-    "méthodes",
+    "methodes",
     "industrialisation",
     "chef de projet",
     "lean",
     "performance industrielle",
-    "amélioration continue",
-    "responsable méthodes",
+    "amelioration continue",
+    "responsable methodes",
 ]
 
-ZONE_GEO = "Seine-Maritime"   # utilisé pour filtrer les annonces
+# Mots acceptes dans le texte de l'annonce pour la zone geo
+ZONES_GEO = [
+    "seine-maritime", "seine maritime", "76",
+    "rouen", "le havre", "havre", "dieppe", "fecamp", "elbeuf",
+    "barentin", "yvetot", "montivilliers", "bolbec",
+    "normandie", "haute-normandie",
+    "remote", "teletravail", "distanciel", "france entiere",
+]
+
+# Mettre a False pour recevoir TOUTES les annonces sans filtre geo
+# (utile pour diagnostiquer si le probleme vient du filtre)
+FILTRER_PAR_ZONE = False
 
 EMAIL_DESTINATAIRE = "nicolas.reichstadt@gmail.com"
-EMAIL_EXPEDITEUR   = "nicolas.reichstadt@gmail.com"  # ton Gmail (expéditeur = toi)
+EMAIL_EXPEDITEUR   = "nicolas.reichstadt@gmail.com"
 
-# Nombre max d'annonces par site dans l'email
 MAX_ANNONCES_PAR_SITE = 10
 # ------------------------------------------------------------
 
@@ -36,110 +45,115 @@ from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# Clés récupérées depuis les secrets GitHub (jamais écrites dans le code)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GMAIL_PASSWORD  = os.environ.get("GMAIL_PASSWORD", "")
-
-# Fichier qui mémorise les annonces déjà envoyées (évite les doublons)
 FICHIER_HISTORIQUE = "historique_annonces.json"
 
 # ============================================================
-#  FLUX RSS DES SITES D'EMPLOI
+#  FLUX RSS - UN PAR MOT-CLE (logique OU)
 # ============================================================
 
 def construire_flux_rss():
-    """
-    Construit les URLs RSS pour chaque site.
-    On crée UN flux par mot-clé (logique OU) plutôt qu'un seul flux
-    avec tous les mots ensemble (qui ferait un ET implicite).
-    """
     flux = {}
-    zone_encodée = ZONE_GEO.replace(" ", "+").replace("-", "+")
-
     for mot in MOTS_CLES:
-        mot_encodé = mot.replace(" ", "%20")
-        mot_url    = mot.replace(" ", "+")
+        mot_url = mot.replace(" ", "+")
+        mot_pct = mot.replace(" ", "%20")
 
-        # APEC — un flux par mot-clé
-        flux[f"APEC | {mot}"] = (
-            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi?"
-            f"motsCles={mot_encodé}&lieu=76&typesContrat=1&page=1&format=rss"
+        # APEC - code departement 76 = Seine-Maritime
+        flux[f"APEC|{mot}"] = (
+            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi"
+            f"?motsCles={mot_pct}&lieu=76&page=1&format=rss"
         )
 
-        # Welcome to the Jungle — un flux par mot-clé
-        flux[f"WTTJ | {mot}"] = (
-            f"https://www.welcometothejungle.com/fr/jobs.rss?"
-            f"query={mot_encodé}&aroundQuery={zone_encodée}&page=1"
+        # Indeed France - fromage=1 = annonces des 24 dernieres heures
+        flux[f"Indeed|{mot}"] = (
+            f"https://fr.indeed.com/rss?q={mot_url}&l=Seine-Maritime"
+            f"&sort=date&fromage=1"
         )
 
-        # Indeed — un flux par mot-clé
-        flux[f"Indeed | {mot}"] = (
-            f"https://fr.indeed.com/rss?q={mot_url}"
-            f"&l={zone_encodée}&sort=date&fromage=1"
+        # Welcome to the Jungle
+        flux[f"WTTJ|{mot}"] = (
+            f"https://www.welcometothejungle.com/fr/jobs.rss"
+            f"?query={mot_pct}&aroundQuery=Seine-Maritime&page=1"
         )
 
     return flux
 
 # ============================================================
-#  CHARGEMENT / SAUVEGARDE DE L'HISTORIQUE
+#  HISTORIQUE (anti-doublons entre les jours)
 # ============================================================
 
 def charger_historique():
-    """Charge la liste des annonces déjà vues."""
     if os.path.exists(FICHIER_HISTORIQUE):
         with open(FICHIER_HISTORIQUE, "r", encoding="utf-8") as f:
             return json.load(f)
     return []
 
 def sauvegarder_historique(historique):
-    """Sauvegarde la liste des annonces vues (garde 30 jours max)."""
     limite = datetime.now() - timedelta(days=30)
-    historique_filtre = [
-        h for h in historique
-        if datetime.fromisoformat(h.get("date", "2000-01-01")) > limite
-    ]
+    filtre = []
+    for h in historique:
+        try:
+            if datetime.fromisoformat(h.get("date", "2000-01-01")) > limite:
+                filtre.append(h)
+        except Exception:
+            pass
     with open(FICHIER_HISTORIQUE, "w", encoding="utf-8") as f:
-        json.dump(historique_filtre, f, ensure_ascii=False, indent=2)
+        json.dump(filtre, f, ensure_ascii=False, indent=2)
 
 def id_annonce(annonce):
-    """Génère un identifiant unique pour une annonce."""
     chaine = f"{annonce.get('title','')}{annonce.get('link','')}"
     return hashlib.md5(chaine.encode()).hexdigest()
 
 # ============================================================
-#  SCRAPING DES FLUX RSS
+#  FILTRE PERTINENCE
 # ============================================================
 
 def est_pertinente(annonce):
-    """Vérifie si une annonce correspond aux mots-clés et à la zone."""
     texte = (
         annonce.get("title", "") + " " +
         annonce.get("summary", "") + " " +
         annonce.get("location", "")
     ).lower()
 
-    # Filtre géographique (Seine-Maritime = 76, Rouen, Le Havre, Dieppe...)
-    zones_acceptées = [
-        "seine-maritime", "seine maritime", "76",
-        "rouen", "le havre", "dieppe", "fécamp", "elbeuf",
-        "normandie", "remote", "télétravail", "distanciel"
-    ]
-    zone_ok = any(z in texte for z in zones_acceptées)
-    if not zone_ok:
-        return False
+    if FILTRER_PAR_ZONE:
+        if not any(z in texte for z in ZONES_GEO):
+            return False
 
-    # Filtre mots-clés (au moins 1 mot-clé doit apparaître)
-    mots_ok = any(mot.lower() in texte for mot in MOTS_CLES)
-    return mots_ok
+    return any(mot.lower() in texte for mot in MOTS_CLES)
 
-def scraper_flux(nom_site, url_rss):
-    """Récupère et filtre les annonces d'un flux RSS."""
+# ============================================================
+#  SCRAPING avec diagnostics detailles
+# ============================================================
+
+def scraper_flux(nom_flux, url_rss):
+    nom_site = nom_flux.split("|")[0]
     annonces = []
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (agent-emploi-rss-reader/1.0)"}
-        response = requests.get(url_rss, headers=headers, timeout=15)
-        feed = feedparser.parse(response.content)
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        }
+        response = requests.get(url_rss, headers=headers, timeout=20)
+        print(f"   HTTP {response.status_code} — {len(response.content)} octets")
 
+        if response.status_code != 200:
+            print(f"   ERREUR : {response.text[:200]}")
+            return []
+
+        feed = feedparser.parse(response.content)
+        nb = len(feed.entries)
+        print(f"   {nb} entree(s) dans le flux RSS")
+
+        if nb == 0:
+            print(f"   Contenu brut (200 premiers chars) : {response.text[:200]}")
+            return []
+
+        rejets_zone = 0
+        rejets_mots = 0
         for entry in feed.entries:
             annonce = {
                 "title":    entry.get("title", "Sans titre"),
@@ -149,77 +163,91 @@ def scraper_flux(nom_site, url_rss):
                 "date":     entry.get("published", ""),
                 "site":     nom_site,
             }
-            if est_pertinente(annonce):
+            texte = (annonce["title"] + " " + annonce["summary"] + " " + annonce["location"]).lower()
+            zone_ok = any(z in texte for z in ZONES_GEO)
+            mots_ok = any(m.lower() in texte for m in MOTS_CLES)
+
+            if FILTRER_PAR_ZONE and not zone_ok:
+                rejets_zone += 1
+            elif not mots_ok:
+                rejets_mots += 1
+            else:
                 annonces.append(annonce)
 
+        if rejets_zone > 0:
+            print(f"   {rejets_zone} rejet(s) : zone geo non reconnue")
+        if rejets_mots > 0:
+            print(f"   {rejets_mots} rejet(s) : mots-cles absents")
+        if annonces:
+            print(f"   {len(annonces)} annonce(s) retenue(s)")
+
     except Exception as e:
-        print(f"[{nom_site}] Erreur : {e}")
+        print(f"   EXCEPTION : {e}")
 
     return annonces[:MAX_ANNONCES_PAR_SITE]
 
 # ============================================================
-#  SYNTHÈSE IA AVEC GEMINI
+#  SYNTHESE GEMINI
 # ============================================================
 
-def synthétiser_avec_gemini(annonces):
-    """Envoie les annonces à Gemini et récupère une synthèse structurée."""
+def synthetiser_avec_gemini(annonces):
     if not annonces:
         return "Aucune nouvelle annonce aujourd'hui."
-
     if not GEMINI_API_KEY:
-        return "⚠️ Clé Gemini manquante — synthèse IA désactivée."
+        return "Cle Gemini manquante — liste brute :\n\n" + "\n".join(
+            f"- {a['title']} ({a['site']})\n  {a['link']}" for a in annonces
+        )
 
     liste_texte = ""
     for i, a in enumerate(annonces, 1):
         liste_texte += (
             f"\n{i}. [{a['site']}] {a['title']}\n"
-            f"   Résumé : {a['summary'][:300]}\n"
+            f"   Resume : {a['summary'][:300]}\n"
             f"   Lien : {a['link']}\n"
         )
 
-    prompt = f"""Tu es un assistant de recherche d'emploi. Voici {len(annonces)} nouvelles offres d'emploi trouvées aujourd'hui pour Nicolas, qui cherche des postes en méthodes, industrialisation, lean, amélioration continue ou chef de projet en Seine-Maritime.
-
-{liste_texte}
-
-Rédige un email de synthèse en français avec :
-1. Un court résumé global (2-3 phrases) sur la qualité des offres du jour
-2. Pour chaque annonce : le titre, l'entreprise si mentionnée, un résumé en 1-2 phrases, et le lien
-3. Un conseil du jour sur la candidature ou la recherche d'emploi dans ce secteur
-
-Format : texte simple, pas de markdown, lisible directement dans un email."""
+    prompt = (
+        f"Tu es un assistant de recherche d'emploi. Voici {len(annonces)} nouvelles offres "
+        f"trouvees aujourd'hui pour Nicolas, qui cherche des postes en methodes industrielles, "
+        f"lean, amelioration continue ou chef de projet en Seine-Maritime.\n\n"
+        f"{liste_texte}\n\n"
+        f"Redige un email de synthese en francais avec :\n"
+        f"1. Un court resume global (2-3 phrases)\n"
+        f"2. Pour chaque annonce : titre, entreprise si connue, resume en 1-2 phrases, lien\n"
+        f"3. Un conseil du jour pour les candidatures dans ce secteur\n\n"
+        f"Format : texte simple, lisible dans un email."
+    )
 
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            "gemini-1.5-flash:generateContent"
-            f"?key={GEMINI_API_KEY}"
+            f"gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
         )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000}
         }
-        response = requests.post(url, json=payload, timeout=30)
-        data = response.json()
-        return (
-            data["candidates"][0]["content"]["parts"][0]["text"]
-        )
+        r = requests.post(url, json=payload, timeout=30)
+        data = r.json()
+        if "candidates" in data:
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            print(f"Gemini reponse inattendue : {data}")
+            raise ValueError("Pas de candidates")
     except Exception as e:
         print(f"Erreur Gemini : {e}")
-        # Fallback : liste brute sans IA
-        fallback = "Synthèse IA indisponible — voici les annonces brutes :\n\n"
-        for a in annonces:
-            fallback += f"• {a['title']} ({a['site']})\n  {a['link']}\n\n"
-        return fallback
+        return "Synthese indisponible.\n\n" + "\n".join(
+            f"- {a['title']} ({a['site']})\n  {a['link']}" for a in annonces
+        )
 
 # ============================================================
-#  ENVOI DE L'EMAIL
+#  ENVOI EMAIL
 # ============================================================
 
 def envoyer_email(sujet, corps):
-    """Envoie l'email de résumé via Gmail SMTP."""
     if not GMAIL_PASSWORD:
-        print("⚠️ GMAIL_PASSWORD manquant — email non envoyé.")
-        print("--- CONTENU QUI AURAIT ÉTÉ ENVOYÉ ---")
+        print("GMAIL_PASSWORD manquant — email non envoye.")
+        print("=== CONTENU QUI AURAIT ETE ENVOYE ===")
         print(corps)
         return
 
@@ -227,43 +255,38 @@ def envoyer_email(sujet, corps):
     msg["Subject"] = sujet
     msg["From"]    = EMAIL_EXPEDITEUR
     msg["To"]      = EMAIL_DESTINATAIRE
-
-    # Version texte plain
     msg.attach(MIMEText(corps, "plain", "utf-8"))
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as serveur:
-            serveur.login(EMAIL_EXPEDITEUR, GMAIL_PASSWORD)
-            serveur.sendmail(EMAIL_EXPEDITEUR, EMAIL_DESTINATAIRE, msg.as_string())
-        print(f"✅ Email envoyé à {EMAIL_DESTINATAIRE}")
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
+            srv.login(EMAIL_EXPEDITEUR, GMAIL_PASSWORD)
+            srv.sendmail(EMAIL_EXPEDITEUR, EMAIL_DESTINATAIRE, msg.as_string())
+        print(f"Email envoye a {EMAIL_DESTINATAIRE}")
     except Exception as e:
-        print(f"❌ Erreur envoi email : {e}")
+        print(f"Erreur envoi email : {e}")
 
 # ============================================================
-#  PROGRAMME PRINCIPAL
+#  MAIN
 # ============================================================
 
 def main():
-    print(f"\n{'='*50}")
-    print(f"  Agent emploi - {datetime.now().strftime('%d/%m/%Y %H:%M')}")
-    print(f"{'='*50}\n")
+    print(f"\n{'='*55}")
+    print(f"  Agent emploi — {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+    print(f"  Filtre zone : {'ACTIF' if FILTRER_PAR_ZONE else 'DESACTIVE (mode debug)'}")
+    print(f"{'='*55}\n")
 
-    # 1. Charger l'historique des annonces déjà vues
     historique = charger_historique()
     ids_vus = {h["id"] for h in historique}
-    print(f"📋 Historique : {len(ids_vus)} annonces déjà connues\n")
+    print(f"Historique : {len(ids_vus)} annonces deja connues\n")
 
-    # 2. Scraper tous les sites (un flux par mot-clé = logique OU)
     flux = construire_flux_rss()
     nouvelles_annonces = []
-    ids_session = set()   # évite les doublons dans la même session
-                          # (même annonce trouvée par 2 mots-clés différents)
+    ids_session = set()
     sites_compteurs = {}
 
     for nom_flux, url_rss in flux.items():
-        nom_site = nom_flux.split(" | ")[0]
-        print(f"🔍 {nom_flux}...")
-        annonces = scraper_flux(nom_site, url_rss)
+        print(f">>> {nom_flux}")
+        annonces = scraper_flux(nom_flux, url_rss)
 
         nb_nouvelles = 0
         for annonce in annonces:
@@ -280,36 +303,35 @@ def main():
                 })
                 nb_nouvelles += 1
 
+        nom_site = nom_flux.split("|")[0]
         sites_compteurs[nom_site] = sites_compteurs.get(nom_site, 0) + nb_nouvelles
-        print(f"   -> {nb_nouvelles} nouvelle(s) (doublons ignores)")
+        print()
 
-    print(f"\nResume par site :")
+    print("--- Bilan ---")
     for site, nb in sites_compteurs.items():
-        print(f"   {site} : {nb} nouvelle(s)")
-    print(f"\n{len(nouvelles_annonces)} nouvelle(s) annonce(s) uniques au total\n")
+        print(f"  {site} : {nb} nouvelle(s)")
+    print(f"  TOTAL : {len(nouvelles_annonces)} annonce(s) unique(s)\n")
 
-    # 3. Sauvegarder l'historique mis à jour
     sauvegarder_historique(historique)
 
-    # 4. Construire et envoyer l'email
     date_str = datetime.now().strftime("%A %d %B %Y").capitalize()
 
     if nouvelles_annonces:
-        print("🤖 Synthèse avec Gemini en cours...")
-        synthèse = synthétiser_avec_gemini(nouvelles_annonces)
-        sujet = f"🎯 {len(nouvelles_annonces)} nouvelle(s) offre(s) d'emploi — {date_str}"
+        print("Synthese Gemini en cours...")
+        synthese = synthetiser_avec_gemini(nouvelles_annonces)
+        sujet = f"[Agent emploi] {len(nouvelles_annonces)} nouvelle(s) offre(s) — {date_str}"
     else:
-        synthèse = (
+        synthese = (
             f"Bonjour Nicolas,\n\n"
-            f"Aucune nouvelle offre trouvée aujourd'hui correspondant à tes critères "
-            f"(méthodes / lean / chef de projet en Seine-Maritime).\n\n"
-            f"L'agent a vérifié : {', '.join(flux.keys())}\n\n"
-            f"À demain !"
+            f"Aucune nouvelle offre trouvee aujourd'hui.\n"
+            f"Sites verifies : APEC, Indeed, Welcome to the Jungle\n"
+            f"Mots-cles : {', '.join(MOTS_CLES)}\n\n"
+            f"A demain !"
         )
-        sujet = f"Agent emploi — Aucune nouvelle offre — {date_str}"
+        sujet = f"[Agent emploi] Aucune offre — {date_str}"
 
-    envoyer_email(sujet, synthèse)
-    print("\n✅ Agent terminé avec succès.")
+    envoyer_email(sujet, synthese)
+    print("Agent termine.")
 
 if __name__ == "__main__":
     main()
