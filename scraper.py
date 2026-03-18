@@ -165,6 +165,91 @@ def id_offre(offre):
     ).hexdigest()
 
 # ============================================================
+#  CALCUL DISTANCE A VOL D'OISEAU DEPUIS CLERES
+# ============================================================
+
+import math
+
+# Coordonnees GPS de Cleres (76690)
+CLERES_LAT = 49.5986
+CLERES_LON = 1.1194
+
+# Coordonnees GPS des principales villes de Seine-Maritime
+# et communes voisines
+VILLES_GPS = {
+    "rouen":           (49.4432, 1.0993),
+    "le havre":        (49.4944, 0.1079),
+    "dieppe":          (49.9225, 1.0750),
+    "fecamp":          (49.7557, 0.3753),
+    "yvetot":          (49.6196, 0.7561),
+    "barentin":        (49.5461, 0.9572),
+    "elbeuf":          (49.2833, 1.0167),
+    "lillebonne":      (49.5167, 0.5333),
+    "bolbec":          (49.5736, 0.4681),
+    "montivilliers":   (49.5447, 0.1900),
+    "gonfreville":     (49.5000, 0.2333),
+    "harfleur":        (49.5097, 0.2003),
+    "caudebec":        (49.5333, 0.7333),
+    "duclair":         (49.4833, 0.8833),
+    "maromme":         (49.4833, 1.0500),
+    "deville":         (49.4667, 1.0500),
+    "mont-saint-aignan":(49.4667, 1.0833),
+    "bois-guillaume":  (49.4667, 1.1167),
+    "bihorel":         (49.4500, 1.1167),
+    "isneauville":     (49.5000, 1.1500),
+    "cleres":          (49.5986, 1.1194),
+    "buchy":           (49.5833, 1.3500),
+    "forges-les-eaux": (49.6167, 1.5500),
+    "neufchatel":      (49.7333, 1.4333),
+    "eu":              (50.0500, 1.4167),
+    "saint-valery":    (49.8667, 0.7167),
+    "etretat":         (49.7083, 0.2028),
+    "goderville":      (49.6333, 0.3667),
+    "lillebonne":      (49.5167, 0.5333),
+    "vernon":          (49.0931, 1.4833),
+    "gisors":          (49.2833, 1.7833),
+}
+
+def calculer_distance_km(lat1, lon1, lat2, lon2):
+    """Distance en km entre deux points GPS (formule haversine)."""
+    R = 6371
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (math.sin(dlat/2)**2 +
+         math.cos(math.radians(lat1)) *
+         math.cos(math.radians(lat2)) *
+         math.sin(dlon/2)**2)
+    return R * 2 * math.asin(math.sqrt(a))
+
+def estimer_trajet(lieu):
+    """
+    Estime le temps de trajet en voiture depuis Cleres.
+    - Cherche la ville dans le texte du lieu
+    - Calcule la distance a vol d'oiseau
+    - Applique vitesse moyenne 70 km/h + 10 min forfait (sorties/entrees ville)
+    - Retourne (minutes, ville_trouvee)
+    """
+    if not lieu:
+        return None, None
+
+    lieu_lower = lieu.lower()
+
+    # Si juste "Seine-Maritime" ou "76" sans ville = Cleres
+    if lieu_lower in ["seine-maritime", "76", "seine maritime", ""]:
+        return 0, "Cleres"
+
+    # Cherche une ville connue dans le lieu
+    for ville, (lat, lon) in VILLES_GPS.items():
+        if ville in lieu_lower:
+            dist_km = calculer_distance_km(CLERES_LAT, CLERES_LON, lat, lon)
+            # Vitesse moyenne 70 km/h + 10 min forfait depart/arrivee
+            minutes = int((dist_km / 70) * 60) + 10
+            return minutes, ville.capitalize()
+
+    # Ville non trouvee dans le dictionnaire
+    re
+
+# ============================================================
 #  SYNTHESE GEMINI
 # ============================================================
 
