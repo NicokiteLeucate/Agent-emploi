@@ -21,7 +21,7 @@ jobs:
           python-version: '3.11'
 
       - name: Installer les dependances
-        run: pip install requests
+        run: pip install requests feedparser
 
       - name: Lancer l'agent
         env:
