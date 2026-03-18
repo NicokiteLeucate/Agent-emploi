@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================
 #  AGENT RECHERCHE EMPLOI - Nicolas Reichstadt
-#  Sources : API France Travail + RSS Hellowork + RSS Cadremploi
+#  Sources : API France Travail + RSS APEC
 # ============================================================
 
 # --- TA CONFIGURATION --------------------------------------
@@ -24,7 +24,6 @@ EMAIL_EXPEDITEUR   = "nicolas.reichstadt@gmail.com"
 import os
 import re
 import json
-import math
 import smtplib
 import hashlib
 import feedparser
@@ -35,7 +34,6 @@ from email.mime.text import MIMEText
 
 CLIENT_ID      = os.environ.get("CLIENT_ID", "")
 CLIENT_SECRET  = os.environ.get("CLIENT_SECRET", "")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GMAIL_PASSWORD = os.environ.get("GMAIL_PASSWORD", "")
 GROQ_API_KEY   = os.environ.get("GROQ_API_KEY", "")
 
@@ -75,8 +73,8 @@ def obtenir_token():
 def rechercher_offres_ft(token, mot_cle):
     url     = "https://api.francetravail.io/partenaire/offresdemploi/v2/offres/search"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    hier         = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    aujourd_hui  = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    hier        = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    aujourd_hui = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     params  = {
         "motsCles":        mot_cle,
         "departement":     DEPARTEMENT,
@@ -103,7 +101,7 @@ def rechercher_offres_ft(token, mot_cle):
         return []
 
 def normaliser_offre_ft(offre):
-    lieu      = offre.get("lieuTravail", {})
+    lieu       = offre.get("lieuTravail", {})
     entreprise = offre.get("entreprise", {})
     return {
         "id":         offre.get("id", ""),
@@ -121,10 +119,25 @@ def normaliser_offre_ft(offre):
     }
 
 # ============================================================
-#  SCRAPING RSS HELLOWORK + CADREMPLOI
+#  RSS APEC
 # ============================================================
 
-def scraper_rss(nom_flux, url_rss):
+def construire_flux_apec():
+    """
+    APEC RSS — code region 7 = Normandie, on filtre ensuite sur 76.
+    On teste aussi avec le code departement directement.
+    """
+    flux = {}
+    for mot in MOTS_CLES:
+        mot_pct = mot.replace(" ", "%20")
+        # Tentative 1 : filtre departement 76 direct
+        flux[f"APEC|{mot}"] = (
+            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi"
+            f"?motsCles={mot_pct}&lieu=76&page=1&format=rss"
+        )
+    return flux
+
+def scraper_apec(nom_flux, url_rss):
     nom_site = nom_flux.split("|")[0]
     annonces = []
     try:
@@ -132,7 +145,8 @@ def scraper_rss(nom_flux, url_rss):
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
         }
         r = requests.get(url_rss, headers=headers, timeout=20)
         print(f"  HTTP {r.status_code} — {len(r.content)} octets")
@@ -142,11 +156,16 @@ def scraper_rss(nom_flux, url_rss):
             return []
 
         feed = feedparser.parse(r.content)
-        print(f"  {len(feed.entries)} entree(s) dans le flux")
+        nb   = len(feed.entries)
+        print(f"  {nb} entree(s) dans le flux")
+
+        if nb == 0:
+            print(f"  Contenu brut : {r.text[:200]}")
+            return []
 
         for entry in feed.entries:
             annonces.append({
-                "id":         "",
+                "id":         entry.get("id", ""),
                 "title":      entry.get("title", "Sans titre"),
                 "entreprise": entry.get("author", "Non precisee"),
                 "lieu":       entry.get("location", "Seine-Maritime"),
@@ -162,21 +181,6 @@ def scraper_rss(nom_flux, url_rss):
 
     return annonces
 
-def construire_flux_rss():
-    flux = {}
-    for mot in MOTS_CLES:
-        mot_url = mot.replace(" ", "+")
-        mot_pct = mot.replace(" ", "%20")
-        flux[f"Hellowork|{mot}"] = (
-            f"https://www.hellowork.com/fr-fr/emploi/recherche.html"
-            f"?k={mot_url}&l=Seine-Maritime&d=1&c=all&ray=all&tt=all&rss=1"
-        )
-        flux[f"Cadremploi|{mot}"] = (
-            f"https://www.cadremploi.fr/emploi/liste_offres.rss"
-            f"?quoi={mot_pct}&ou=Seine-Maritime"
-        )
-    return flux
-
 # ============================================================
 #  HISTORIQUE ANTI-DOUBLONS
 # ============================================================
@@ -188,8 +192,8 @@ def charger_historique():
     return []
 
 def sauvegarder_historique(historique):
-    limite  = datetime.now() - timedelta(days=30)
-    filtre  = []
+    limite = datetime.now() - timedelta(days=30)
+    filtre = []
     for h in historique:
         try:
             if datetime.fromisoformat(h.get("date", "2000-01-01")) > limite:
@@ -201,7 +205,7 @@ def sauvegarder_historique(historique):
 
 def id_offre(offre):
     if offre.get("id"):
-        return offre["id"]
+        return str(offre["id"])
     return hashlib.md5(
         f"{offre.get('title','')}{offre.get('link','')}".encode()
     ).hexdigest()
@@ -224,12 +228,11 @@ def synthetiser(annonces):
             f"   Lien : {a['link']}\n"
         )
 
-    # Fallback sans IA
     if not GROQ_API_KEY:
         texte = f"{len(annonces)} nouvelles offres aujourd'hui :\n\n"
         for a in annonces:
             texte += (
-                f"- {a['title']} ({a['site']})\n"
+                f"- [{a['site']}] {a['title']}\n"
                 f"  Entreprise : {a['entreprise']}\n"
                 f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
                 f"  Salaire : {a['salaire']}\n"
@@ -241,8 +244,7 @@ def synthetiser(annonces):
         f"Tu es un assistant de recherche d'emploi pour Nicolas, "
         f"qui cherche des postes en methodes industrielles, lean, "
         f"amelioration continue ou chef de projet en Seine-Maritime.\n\n"
-        f"Voici {len(annonces)} nouvelles offres du jour issues de plusieurs sources "
-        f"(France Travail, Hellowork, Cadremploi) :\n"
+        f"Voici {len(annonces)} nouvelles offres du jour issues de France Travail et de l'APEC :\n"
         f"{liste_texte}\n\n"
         f"Redige un email de synthese en francais structure ainsi :\n"
         f"1. Introduction : resume global en 2-3 phrases sur la qualite des offres\n"
@@ -321,14 +323,11 @@ def main():
         print("ERREUR : secrets CLIENT_ID / CLIENT_SECRET manquants.")
         return
 
-    # Historique
-    historique  = charger_historique()
-    ids_vus     = {h["id"] for h in historique}
-    ids_session = set()
-    print(f"Historique : {len(ids_vus)} offres deja connues\n")
-
-    toutes_offres    = []
-    sites_compteurs  = {}
+    historique   = charger_historique()
+    ids_vus      = {h["id"] for h in historique}
+    ids_session  = set()
+    toutes_offres   = []
+    sites_compteurs = {}
 
     def ajouter_offre(offre):
         oid = id_offre(offre)
@@ -345,8 +344,8 @@ def main():
             return True
         return False
 
-    # --- SOURCE 1 : France Travail API ---
-    print("--- France Travail (API) ---")
+    # --- SOURCE 1 : France Travail ---
+    print("--- France Travail (API officielle) ---")
     token = obtenir_token()
     if token:
         for mot in MOTS_CLES:
@@ -356,14 +355,13 @@ def main():
     else:
         print("Token indisponible — France Travail ignore.")
 
-    # --- SOURCE 2 : RSS Hellowork + Cadremploi ---
-    print("\n--- Sources RSS (Hellowork + Cadremploi) ---")
-    for nom_flux, url_rss in construire_flux_rss().items():
-        nom_site = nom_flux.split("|")[0]
+    # --- SOURCE 2 : APEC RSS ---
+    print("\n--- APEC (flux RSS) ---")
+    for nom_flux, url_rss in construire_flux_apec().items():
         print(f">>> {nom_flux}")
-        annonces = scraper_rss(nom_flux, url_rss)
+        annonces = scraper_apec(nom_flux, url_rss)
         nb = sum(1 for a in annonces if ajouter_offre(a))
-        sites_compteurs[nom_site] = sites_compteurs.get(nom_site, 0) + nb
+        sites_compteurs["APEC"] = sites_compteurs.get("APEC", 0) + nb
         print()
 
     # Bilan
@@ -374,7 +372,6 @@ def main():
 
     sauvegarder_historique(historique)
 
-    # Email
     date_str = datetime.now().strftime("%A %d %B %Y").capitalize()
     if toutes_offres:
         print("Synthese en cours...")
@@ -384,7 +381,7 @@ def main():
         synthese = (
             f"Bonjour Nicolas,\n\n"
             f"Aucune nouvelle offre trouvee aujourd'hui.\n"
-            f"Sources : France Travail, Hellowork, Cadremploi\n"
+            f"Sources verifiees : France Travail, APEC\n"
             f"Mots-cles : {', '.join(MOTS_CLES)}\n\n"
             f"A demain !"
         )
