@@ -252,66 +252,93 @@ def estimer_trajet(lieu):
 # ============================================================
 #  SYNTHESE GEMINI
 # ============================================================
-
 def synthetiser_avec_gemini(annonces):
     if not annonces:
         return "Aucune nouvelle annonce aujourd'hui."
 
     GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-    liste_texte = ""
-    for i, a in enumerate(annonces, 1):
-        liste_texte += (
-            f"\n{i}. {a['title']}\n"
-            f"   Entreprise : {a['entreprise']}\n"
-            f"   Lieu : {a['lieu']} | Contrat : {a['contrat']} | Salaire : {a['salaire']}\n"
-            f"   Description : {a['summary']}\n"
-            f"   Lien : {a['link']}\n"
+    # Calcul des distances AVANT d'appeler Groq
+    for a in annonces:
+        minutes, ville = estimer_trajet(a.get("lieu", ""))
+        a["trajet_minutes"] = minutes
+        a["trajet_ville"]   = ville
+
+    # Trier : proches d'abord, lointaines ensuite
+    proches   = [a for a in annonces if a["trajet_minutes"] is not None and a["trajet_minutes"] <= 45]
+    lointaines = [a for a in annonces if a["trajet_minutes"] is not None and a["trajet_minutes"] > 45]
+    inconnues  = [a for a in annonces if a["trajet_minutes"] is None]
+
+    def formater_offre(a, mention_loin=False):
+        if a["trajet_minutes"] == 0:
+            trajet_str = "Cleres ou alentours (< 5 min)"
+        elif a["trajet_minutes"] is not None:
+            loin = " (LOIN)" if mention_loin else ""
+            trajet_str = f"~{a['trajet_minutes']} min depuis Cleres{loin}"
+        else:
+            trajet_str = "Distance non calculee (ville non reconnue)"
+        return (
+            f"  Poste    : {a['title']}\n"
+            f"  Societe  : {a['entreprise']}\n"
+            f"  Lieu     : {a['lieu']} | Contrat : {a['contrat']}\n"
+            f"  Salaire  : {a['salaire']}\n"
+            f"  Trajet   : {trajet_str}\n"
+            f"  Lien     : {a['link']}\n"
         )
 
-    prompt = (
-        f"Tu es un assistant de recherche d'emploi. Voici {len(annonces)} nouvelles offres "
-        f"trouvees aujourd'hui pour Nicolas, qui habite a Cleres en Seine-Maritime (76).\n\n"
-        f"{liste_texte}\n\n"
-        f"Instructions pour chaque offre :\n"
-        f"1. Estime le temps de trajet en voiture depuis Cleres (76690) vers le lieu de l'offre.\n"
-        f"   - Si le lieu indique uniquement 'Seine-Maritime' ou '76' sans ville precise, "
-        f"considere que c'est a Cleres meme (0 min).\n"
-        f"   - Si le lieu est vide ou inconnu, indique 'Lieu non precise'.\n"
-        f"2. Classe les offres en deux groupes :\n"
-        f"   - Groupe A : trajet inferieur ou egal a 45 min (offres proches)\n"
-        f"   - Groupe B : trajet superieur a 45 min (offres lointaines)\n\n"
-        f"Redige un email de synthese en francais structure ainsi :\n\n"
-        f"--- INTRODUCTION ---\n"
-        f"Resume global en 2-3 phrases sur la qualite des offres du jour.\n\n"
-        f"--- OFFRES PROCHES (moins de 45 min de Cleres) ---\n"
-        f"Pour chaque offre du groupe A :\n"
-        f"  Titre | Entreprise | Lieu | Contrat | Salaire\n"
-        f"  Temps de trajet depuis Cleres : XX min\n"
-        f"  Resume en 1-2 phrases\n"
-        f"  Lien : ...\n\n"
-        f"--- OFFRES LOINTAINES (plus de 45 min de Cleres) ---\n"
-        f"Pour chaque offre du groupe B :\n"
-        f"  Titre | Entreprise | Lieu | Contrat | Salaire\n"
-        f"  Temps de trajet depuis Cleres : XX min (LOIN)\n"
-        f"  Resume en 1-2 phrases\n"
-        f"  Lien : ...\n\n"
-        f"--- CONSEIL DU JOUR ---\n"
-        f"Un conseil pratique pour les candidatures dans le secteur methodes/lean/industrie.\n\n"
-        f"Format : texte clair lisible dans un email, sans markdown, sans asterisques."
+    # Construction de l'email sans IA si pas de cle Groq
+    if not GROQ_API_KEY:
+        email = f"{len(annonces)} nouvelles offres aujourd'hui\n"
+        email += "=" * 50 + "\n\n"
+        if proches:
+            email += f"OFFRES PROCHES ({len(proches)}) — moins de 45 min\n"
+            email += "-" * 40 + "\n"
+            for a in proches:
+                email += formater_offre(a) + "\n"
+        if lointaines:
+            email += f"\nOFFRES LOINTAINES ({len(lointaines)}) — plus de 45 min\n"
+            email += "-" * 40 + "\n"
+            for a in lointaines:
+                email += formater_offre(a, mention_loin=True) + "\n"
+        if inconnues:
+            email += f"\nOFFRES LIEU INCONNU ({len(inconnues)})\n"
+            email += "-" * 40 + "\n"
+            for a in inconnues:
+                email += formater_offre(a) + "\n"
+        return email
+
+    # Construction du prompt pour Groq avec distances deja calculees
+    def section(titre, liste, loin=False):
+        if not liste:
+            return ""
+        texte = f"\n{titre}\n" + "-" * 40 + "\n"
+        for a in liste:
+            texte += formater_offre(a, mention_loin=loin)
+            texte += f"  Description : {a['summary'][:250]}\n\n"
+        return texte
+
+    contenu = (
+        section(f"OFFRES PROCHES ({len(proches)}) — moins de 45 min de Cleres", proches) +
+        section(f"OFFRES LOINTAINES ({len(lointaines)}) — plus de 45 min de Cleres", lointaines, loin=True) +
+        section(f"OFFRES LIEU INCONNU ({len(inconnues)})", inconnues)
     )
 
-    if not GROQ_API_KEY:
-        texte = f"{len(annonces)} nouvelles offres aujourd'hui :\n\n"
-        for a in annonces:
-            texte += (
-                f"- {a['title']}\n"
-                f"  Entreprise : {a['entreprise']}\n"
-                f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
-                f"  Salaire : {a['salaire']}\n"
-                f"  Lien : {a['link']}\n\n"
-            )
-        return texte
+    prompt = (
+        f"Tu es un assistant de recherche d'emploi pour Nicolas, "
+        f"qui habite a Cleres (Seine-Maritime) et cherche des postes "
+        f"en methodes industrielles, lean, amelioration continue ou chef de projet.\n\n"
+        f"Voici {len(annonces)} nouvelles offres du jour avec leurs distances "
+        f"deja calculees depuis Cleres :\n"
+        f"{contenu}\n\n"
+        f"Redige un email de synthese structure ainsi :\n"
+        f"1. Introduction : resume global en 2-3 phrases\n"
+        f"2. Offres proches : reprend chaque offre avec trajet, resume 1-2 phrases, lien\n"
+        f"3. Offres lointaines : idem, en precisant que c'est loin\n"
+        f"4. Offres lieu inconnu : liste simple\n"
+        f"5. Conseil du jour : un conseil pratique pour ce secteur\n\n"
+        f"NE recalcule PAS les distances, utilise exactement celles fournies.\n"
+        f"Format : texte lisible dans un email, sans markdown, sans asterisques."
+    )
 
     try:
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -334,10 +361,7 @@ def synthetiser_avec_gemini(annonces):
             raise ValueError("Pas de choices")
     except Exception as e:
         print(f"Erreur Groq : {e}")
-        texte = f"Synthese indisponible. {len(annonces)} offres du jour :\n\n"
-        for a in annonces:
-            texte += f"- {a['title']} — {a['entreprise']} ({a['lieu']})\n  {a['link']}\n\n"
-        return texte
+        return contenu
 # ============================================================
 #  ENVOI EMAIL
 # ============================================================
