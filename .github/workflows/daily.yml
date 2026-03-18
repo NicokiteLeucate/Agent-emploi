@@ -2,8 +2,8 @@ name: Agent emploi quotidien
 
 on:
   schedule:
-    - cron: '0 6 * * 1-5'   # Lundi-vendredi a 7h Paris (heure hiver)
-  workflow_dispatch:         # Lancement manuel possible
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   recherche-emploi:
@@ -21,15 +21,14 @@ jobs:
           python-version: '3.11'
 
       - name: Installer les dependances
-        run: pip install requests feedparser
+        run: pip install requests
 
       - name: Lancer l'agent
         env:
-          CLIENT_ID:       ${{ secrets.CLIENT_ID }}
-          CLIENT_SECRET:   ${{ secrets.CLIENT_SECRET }}
-          GEMINI_API_KEY:  ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY:    ${{ secrets.GROQ_API_KEY }}
-          GMAIL_PASSWORD:  ${{ secrets.GMAIL_PASSWORD }}
+          CLIENT_ID:      ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET:  ${{ secrets.CLIENT_SECRET }}
+          GROQ_API_KEY:   ${{ secrets.GROQ_API_KEY }}
+          GMAIL_PASSWORD: ${{ secrets.GMAIL_PASSWORD }}
         run: python scraper.py
 
       - name: Sauvegarder l'historique
