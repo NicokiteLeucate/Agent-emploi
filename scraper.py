@@ -224,28 +224,30 @@ def calculer_distance_km(lat1, lon1, lat2, lon2):
 def estimer_trajet(lieu):
     """
     Estime le temps de trajet en voiture depuis Cleres.
-    - Cherche la ville dans le texte du lieu
-    - Calcule la distance a vol d'oiseau
-    - Applique vitesse moyenne 70 km/h + 10 min forfait (sorties/entrees ville)
-    - Retourne (minutes, ville_trouvee)
+    Retourne toujours un tuple (minutes, ville) — jamais None seul.
     """
-    if not lieu:
+    if not lieu or not isinstance(lieu, str):
         return None, None
 
-    lieu_lower = lieu.lower()
+    lieu_lower = lieu.lower().strip()
 
-    # Si juste "Seine-Maritime" ou "76" sans ville = Cleres
-    if lieu_lower in ["seine-maritime", "76", "seine maritime", ""]:
+    # Si juste Seine-Maritime ou 76 sans ville = Cleres
+    if lieu_lower in ["seine-maritime", "76", "seine maritime", "76 - seine-maritime", ""]:
         return 0, "Cleres"
 
-    # Cherche une ville connue dans le lieu
+    # Cherche une ville connue dans le texte du lieu
     for ville, (lat, lon) in VILLES_GPS.items():
         if ville in lieu_lower:
             dist_km = calculer_distance_km(CLERES_LAT, CLERES_LON, lat, lon)
-            # Vitesse moyenne 70 km/h + 10 min forfait depart/arrivee
             minutes = int((dist_km / 70) * 60) + 10
             return minutes, ville.capitalize()
 
+    # Cas particulier : contient "76" = Seine-Maritime sans ville precise
+    if "76" in lieu_lower or "seine-maritime" in lieu_lower or "seine maritime" in lieu_lower:
+        return 0, "Cleres"
+
+    # Ville hors dictionnaire
+    return None, None
     # Ville non trouvee dans le dictionnaire
     re
 
