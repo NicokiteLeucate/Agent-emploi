@@ -88,13 +88,15 @@ def rechercher_offres(token, mot_cle):
 
     # Date d'hier pour ne recuperer que les nouvelles offres
     hier = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    aujourd_hui = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
 
     params = {
         "motsCles":          mot_cle,
         "departement":       DEPARTEMENT,
         "minCreationDate":   hier,
+        "maxCreationDate":   aujourd_hui,
         "range":             f"0-{MAX_RESULTATS - 1}",
-        "sort":              "1",   # tri par date
+        "sort":              "1",
     }
 
     try:
