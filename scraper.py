@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================
 #  AGENT RECHERCHE EMPLOI - Nicolas Reichstadt
-#  Sources : API France Travail + RSS APEC
+#  Source : API officielle France Travail
 # ============================================================
 
 # --- TA CONFIGURATION --------------------------------------
@@ -26,7 +26,6 @@ import re
 import json
 import smtplib
 import hashlib
-import feedparser
 import requests
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -119,69 +118,6 @@ def normaliser_offre_ft(offre):
     }
 
 # ============================================================
-#  RSS APEC
-# ============================================================
-
-def construire_flux_apec():
-    """
-    APEC RSS — code region 7 = Normandie, on filtre ensuite sur 76.
-    On teste aussi avec le code departement directement.
-    """
-    flux = {}
-    for mot in MOTS_CLES:
-        mot_pct = mot.replace(" ", "%20")
-        # Tentative 1 : filtre departement 76 direct
-        flux[f"APEC|{mot}"] = (
-            f"https://www.apec.fr/candidat/recherche-emploi.html/emploi"
-            f"?motsCles={mot_pct}&lieu=76&page=1&format=rss"
-        )
-    return flux
-
-def scraper_apec(nom_flux, url_rss):
-    nom_site = nom_flux.split("|")[0]
-    annonces = []
-    try:
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-            ),
-            "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        }
-        r = requests.get(url_rss, headers=headers, timeout=20)
-        print(f"  HTTP {r.status_code} — {len(r.content)} octets")
-
-        if r.status_code != 200:
-            print(f"  ERREUR : {r.text[:150]}")
-            return []
-
-        feed = feedparser.parse(r.content)
-        nb   = len(feed.entries)
-        print(f"  {nb} entree(s) dans le flux")
-
-        if nb == 0:
-            print(f"  Contenu brut : {r.text[:200]}")
-            return []
-
-        for entry in feed.entries:
-            annonces.append({
-                "id":         entry.get("id", ""),
-                "title":      entry.get("title", "Sans titre"),
-                "entreprise": entry.get("author", "Non precisee"),
-                "lieu":       entry.get("location", "Seine-Maritime"),
-                "contrat":    "",
-                "salaire":    "Non precise",
-                "summary":    re.sub(r"<[^>]+>", " ", entry.get("summary", ""))[:400],
-                "link":       entry.get("link", ""),
-                "date":       entry.get("published", ""),
-                "site":       nom_site,
-            })
-    except Exception as e:
-        print(f"  EXCEPTION : {e}")
-
-    return annonces
-
-# ============================================================
 #  HISTORIQUE ANTI-DOUBLONS
 # ============================================================
 
@@ -221,7 +157,7 @@ def synthetiser(annonces):
     liste_texte = ""
     for i, a in enumerate(annonces, 1):
         liste_texte += (
-            f"\n{i}. [{a['site']}] {a['title']}\n"
+            f"\n{i}. {a['title']}\n"
             f"   Entreprise : {a['entreprise']}\n"
             f"   Lieu : {a['lieu']} | Contrat : {a['contrat']} | Salaire : {a['salaire']}\n"
             f"   Description : {a['summary']}\n"
@@ -232,7 +168,7 @@ def synthetiser(annonces):
         texte = f"{len(annonces)} nouvelles offres aujourd'hui :\n\n"
         for a in annonces:
             texte += (
-                f"- [{a['site']}] {a['title']}\n"
+                f"- {a['title']}\n"
                 f"  Entreprise : {a['entreprise']}\n"
                 f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
                 f"  Salaire : {a['salaire']}\n"
@@ -244,11 +180,11 @@ def synthetiser(annonces):
         f"Tu es un assistant de recherche d'emploi pour Nicolas, "
         f"qui cherche des postes en methodes industrielles, lean, "
         f"amelioration continue ou chef de projet en Seine-Maritime.\n\n"
-        f"Voici {len(annonces)} nouvelles offres du jour issues de France Travail et de l'APEC :\n"
+        f"Voici {len(annonces)} nouvelles offres du jour :\n"
         f"{liste_texte}\n\n"
         f"Redige un email de synthese en francais structure ainsi :\n"
         f"1. Introduction : resume global en 2-3 phrases sur la qualite des offres\n"
-        f"2. Pour chaque offre : source, titre, entreprise, lieu, contrat, salaire, "
+        f"2. Pour chaque offre : titre, entreprise, lieu, contrat, salaire, "
         f"resume en 1-2 phrases, lien\n"
         f"3. Conseil du jour : un conseil pratique pour les candidatures "
         f"dans le secteur methodes/lean/industrie\n\n"
@@ -280,7 +216,7 @@ def synthetiser(annonces):
         print(f"Erreur Groq : {e}")
         texte = f"Synthese indisponible. {len(annonces)} offres du jour :\n\n"
         for a in annonces:
-            texte += f"- {a['title']} ({a['site']}) — {a['entreprise']} ({a['lieu']})\n  {a['link']}\n\n"
+            texte += f"- {a['title']} — {a['entreprise']} ({a['lieu']})\n  {a['link']}\n\n"
         return texte
 
 # ============================================================
@@ -323,11 +259,10 @@ def main():
         print("ERREUR : secrets CLIENT_ID / CLIENT_SECRET manquants.")
         return
 
-    historique   = charger_historique()
-    ids_vus      = {h["id"] for h in historique}
-    ids_session  = set()
+    historique      = charger_historique()
+    ids_vus         = {h["id"] for h in historique}
+    ids_session     = set()
     toutes_offres   = []
-    sites_compteurs = {}
 
     def ajouter_offre(offre):
         oid = id_offre(offre)
@@ -344,30 +279,21 @@ def main():
             return True
         return False
 
-    # --- SOURCE 1 : France Travail ---
+    # --- France Travail ---
     print("--- France Travail (API officielle) ---")
     token = obtenir_token()
     if token:
+        nb_ft = 0
         for mot in MOTS_CLES:
             offres_brutes = rechercher_offres_ft(token, mot)
-            nb = sum(1 for o in offres_brutes if ajouter_offre(normaliser_offre_ft(o)))
-            sites_compteurs["France Travail"] = sites_compteurs.get("France Travail", 0) + nb
+            nb_ft += sum(1 for o in offres_brutes if ajouter_offre(normaliser_offre_ft(o)))
+        print(f"\n  France Travail : {nb_ft} nouvelle(s) offre(s) uniques")
     else:
-        print("Token indisponible — France Travail ignore.")
-
-    # --- SOURCE 2 : APEC RSS ---
-    print("\n--- APEC (flux RSS) ---")
-    for nom_flux, url_rss in construire_flux_apec().items():
-        print(f">>> {nom_flux}")
-        annonces = scraper_apec(nom_flux, url_rss)
-        nb = sum(1 for a in annonces if ajouter_offre(a))
-        sites_compteurs["APEC"] = sites_compteurs.get("APEC", 0) + nb
-        print()
+        print("Token indisponible — arret.")
+        return
 
     # Bilan
-    print("--- Bilan ---")
-    for site, nb in sites_compteurs.items():
-        print(f"  {site} : {nb} nouvelle(s)")
+    print(f"\n--- Bilan ---")
     print(f"  TOTAL : {len(toutes_offres)} offre(s) unique(s)\n")
 
     sauvegarder_historique(historique)
@@ -380,9 +306,8 @@ def main():
     else:
         synthese = (
             f"Bonjour Nicolas,\n\n"
-            f"Aucune nouvelle offre trouvee aujourd'hui.\n"
-            f"Sources verifiees : France Travail, APEC\n"
-            f"Mots-cles : {', '.join(MOTS_CLES)}\n\n"
+            f"Aucune nouvelle offre trouvee aujourd'hui en Seine-Maritime.\n"
+            f"Mots-cles surveilles : {', '.join(MOTS_CLES)}\n\n"
             f"A demain !"
         )
         sujet = f"[Agent emploi] Aucune offre — {date_str}"
