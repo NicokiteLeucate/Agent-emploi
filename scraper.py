@@ -186,18 +186,37 @@ def synthetiser_avec_gemini(annonces):
 
     prompt = (
         f"Tu es un assistant de recherche d'emploi. Voici {len(annonces)} nouvelles offres "
-        f"trouvees aujourd'hui pour Nicolas, qui cherche des postes en methodes industrielles, "
-        f"lean, amelioration continue ou chef de projet en Seine-Maritime.\n\n"
+        f"trouvees aujourd'hui pour Nicolas, qui habite a Cleres en Seine-Maritime (76).\n\n"
         f"{liste_texte}\n\n"
-        f"Redige un email de synthese en francais avec :\n"
-        f"1. Un resume global en 2-3 phrases sur la qualite des offres du jour\n"
-        f"2. Pour chaque offre : titre, entreprise, lieu, contrat, resume en 1-2 phrases, lien\n"
-        f"3. Un conseil du jour pour les candidatures dans ce secteur\n\n"
-        f"Format : texte clair et lisible dans un email, sans markdown."
+        f"Instructions pour chaque offre :\n"
+        f"1. Estime le temps de trajet en voiture depuis Cleres (76690) vers le lieu de l'offre.\n"
+        f"   - Si le lieu indique uniquement 'Seine-Maritime' ou '76' sans ville precise, "
+        f"considere que c'est a Cleres meme (0 min).\n"
+        f"   - Si le lieu est vide ou inconnu, indique 'Lieu non precise'.\n"
+        f"2. Classe les offres en deux groupes :\n"
+        f"   - Groupe A : trajet inferieur ou egal a 45 min (offres proches)\n"
+        f"   - Groupe B : trajet superieur a 45 min (offres lointaines)\n\n"
+        f"Redige un email de synthese en francais structure ainsi :\n\n"
+        f"--- INTRODUCTION ---\n"
+        f"Resume global en 2-3 phrases sur la qualite des offres du jour.\n\n"
+        f"--- OFFRES PROCHES (moins de 45 min de Cleres) ---\n"
+        f"Pour chaque offre du groupe A :\n"
+        f"  Titre | Entreprise | Lieu | Contrat | Salaire\n"
+        f"  Temps de trajet depuis Cleres : XX min\n"
+        f"  Resume en 1-2 phrases\n"
+        f"  Lien : ...\n\n"
+        f"--- OFFRES LOINTAINES (plus de 45 min de Cleres) ---\n"
+        f"Pour chaque offre du groupe B :\n"
+        f"  Titre | Entreprise | Lieu | Contrat | Salaire\n"
+        f"  Temps de trajet depuis Cleres : XX min (LOIN)\n"
+        f"  Resume en 1-2 phrases\n"
+        f"  Lien : ...\n\n"
+        f"--- CONSEIL DU JOUR ---\n"
+        f"Un conseil pratique pour les candidatures dans le secteur methodes/lean/industrie.\n\n"
+        f"Format : texte clair lisible dans un email, sans markdown, sans asterisques."
     )
 
     if not GROQ_API_KEY:
-        # Fallback sans IA
         texte = f"{len(annonces)} nouvelles offres aujourd'hui :\n\n"
         for a in annonces:
             texte += (
@@ -219,7 +238,7 @@ def synthetiser_avec_gemini(annonces):
             "model":       "llama-3.3-70b-versatile",
             "messages":    [{"role": "user", "content": prompt}],
             "temperature": 0.3,
-            "max_tokens":  2000,
+            "max_tokens":  3000,
         }
         r = requests.post(url, headers=headers, json=payload, timeout=30)
         data = r.json()
@@ -227,7 +246,7 @@ def synthetiser_avec_gemini(annonces):
             return data["choices"][0]["message"]["content"]
         else:
             print(f"Groq reponse inattendue : {data}")
-            raise ValueError("Pas de choices dans la reponse")
+            raise ValueError("Pas de choices")
     except Exception as e:
         print(f"Erreur Groq : {e}")
         texte = f"Synthese indisponible. {len(annonces)} offres du jour :\n\n"
