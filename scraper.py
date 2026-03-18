@@ -207,7 +207,7 @@ def synthetiser_avec_gemini(annonces):
     try:
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
         )
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
