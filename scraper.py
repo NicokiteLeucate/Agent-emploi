@@ -169,18 +169,10 @@ def id_offre(offre):
 # ============================================================
 
 def synthetiser_avec_gemini(annonces):
-    if not GEMINI_API_KEY:
-        # Pas de Gemini : on envoie la liste brute
-        texte = "Nouvelles offres du jour :\n\n"
-        for a in annonces:
-            texte += (
-                f"- {a['title']}\n"
-                f"  Entreprise : {a['entreprise']}\n"
-                f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
-                f"  Salaire : {a['salaire']}\n"
-                f"  Lien : {a['link']}\n\n"
-            )
-        return texte
+    if not annonces:
+        return "Aucune nouvelle annonce aujourd'hui."
+
+    GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
     liste_texte = ""
     for i, a in enumerate(annonces, 1):
@@ -199,35 +191,49 @@ def synthetiser_avec_gemini(annonces):
         f"{liste_texte}\n\n"
         f"Redige un email de synthese en francais avec :\n"
         f"1. Un resume global en 2-3 phrases sur la qualite des offres du jour\n"
-        f"2. Pour chaque offre : titre, entreprise, lieu, type de contrat, resume en 1-2 phrases, lien\n"
-        f"3. Un conseil du jour pour les candidatures dans ce secteur industriel\n\n"
+        f"2. Pour chaque offre : titre, entreprise, lieu, contrat, resume en 1-2 phrases, lien\n"
+        f"3. Un conseil du jour pour les candidatures dans ce secteur\n\n"
         f"Format : texte clair et lisible dans un email, sans markdown."
     )
 
+    if not GROQ_API_KEY:
+        # Fallback sans IA
+        texte = f"{len(annonces)} nouvelles offres aujourd'hui :\n\n"
+        for a in annonces:
+            texte += (
+                f"- {a['title']}\n"
+                f"  Entreprise : {a['entreprise']}\n"
+                f"  Lieu : {a['lieu']} | Contrat : {a['contrat']}\n"
+                f"  Salaire : {a['salaire']}\n"
+                f"  Lien : {a['link']}\n\n"
+            )
+        return texte
+
     try:
-        url = (
-            "https://generativelanguage.googleapis.com/v1beta/models/"
-    f"gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-        )
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2000},
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type":  "application/json",
         }
-        r = requests.post(url, json=payload, timeout=30)
+        payload = {
+            "model":       "llama-3.3-70b-versatile",
+            "messages":    [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens":  2000,
+        }
+        r = requests.post(url, headers=headers, json=payload, timeout=30)
         data = r.json()
-        if "candidates" in data:
-            return data["candidates"][0]["content"]["parts"][0]["text"]
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
         else:
-            print(f"Gemini reponse inattendue : {data}")
-            raise ValueError("Pas de candidates")
+            print(f"Groq reponse inattendue : {data}")
+            raise ValueError("Pas de choices dans la reponse")
     except Exception as e:
-        print(f"Erreur Gemini : {e}")
-        # Fallback liste brute
-        texte = f"Synthese IA indisponible. {len(annonces)} offres du jour :\n\n"
+        print(f"Erreur Groq : {e}")
+        texte = f"Synthese indisponible. {len(annonces)} offres du jour :\n\n"
         for a in annonces:
             texte += f"- {a['title']} — {a['entreprise']} ({a['lieu']})\n  {a['link']}\n\n"
         return texte
-
 # ============================================================
 #  ENVOI EMAIL
 # ============================================================
